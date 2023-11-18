@@ -156,6 +156,29 @@ let l = array[2]
 ```
 let s = v2d as string
 ```
+#### Клонирование объекта
+```
+// пусть у нас есть тип
+type vector2 = {
+    x: number;
+    y: number;
+    lengthSquared: () => number;
+}
+// есть объект с реализацией типа
+let v2dOriginal: vector2 = {
+    x: 0;
+    y: 0;
+    lengthSquared => () {
+        return x * x + y * y
+    };
+}
+// мы хотим другой объект такого же типа
+// без повторной реализации методов
+let v2dClone = v2dOriginal with {
+    x: 3;
+    y: 4;
+}
+```
 #### Стандартная библиотека
 - Функция `print` c сигнатурой `(string) => void`; осуществляет печать строки на экран
 
