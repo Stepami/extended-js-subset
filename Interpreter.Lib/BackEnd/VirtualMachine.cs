@@ -1,4 +1,4 @@
-using Interpreter.Lib.BackEnd.Instructions;
+using Interpreter.Lib.BackEnd.Addresses;
 
 namespace Interpreter.Lib.BackEnd;
 
@@ -11,11 +11,11 @@ public record VirtualMachine(
     public VirtualMachine() :
         this(new(), new(), new(), Console.Out) { }
 
-    public void Run(List<Instruction> instructions)
+    public void Run(AddressedInstructions instructions)
     {
-        Frames.Push(new Frame());
+        Frames.Push(new Frame(instructions.Start));
 
-        var address = 0;
+        var address = instructions.Start;
         while (!instructions[address].End())
         {
             var instruction = instructions[address];
@@ -28,27 +28,30 @@ public record VirtualMachine(
 }
     
 public record Call(
-    int From, FunctionInfo To, 
+    IAddress From, FunctionInfo To, 
     List<(string Id, object Value)> Parameters,
     string Where = null)
 {
     public override string ToString() =>
-        $"{From} => {To.Location}: {To.Id}({string.Join(", ", Parameters.Select(x => $"{x.Id}: {x.Value}"))})";
+        $"{From} => {To.Start}: {To.Id}({string.Join(", ", Parameters.Select(x => $"{x.Id}: {x.Value}"))})";
 }
     
-public record FunctionInfo(string Id, int Location = 0, string MethodOf = null)
+public record FunctionInfo(string Id, string MethodOf = null)
 {
-    public int Location { get; set; } = Location;
+    public Label Start =>
+        new($"Start_{this}");
+
+    public Label End =>
+        new($"End_{this}");
 
     public string MethodOf { get; set; } = MethodOf;
 
-    public string CallId() =>
+    private string CallId() =>
         MethodOf == null
             ? Id
             : $"{MethodOf}.{Id}";
 
-    public override string ToString() =>
-        $"({Location}, {CallId()})";
+    public override string ToString() => CallId();
 }
     
 public class Frame
@@ -56,18 +59,15 @@ public class Frame
     private readonly Dictionary<string, object> _variables = new();
     private readonly Frame _parentFrame;
 
-    public int ReturnAddress { get; }
+    public IAddress ReturnAddress { get; }
 
-    public Frame(int returnAddress = 0, Frame parentFrame = null)
-    {
-        ReturnAddress = returnAddress;
-        _parentFrame = parentFrame;
-    }
+    public Frame(IAddress returnAddress, Frame parentFrame = null) =>
+        (ReturnAddress, _parentFrame) = (returnAddress, parentFrame);
 
     public object this[string id]
     {
-        get => _variables.ContainsKey(id)
-            ? _variables[id]
+        get => _variables.TryGetValue(id, out var value)
+            ? value
             : _parentFrame?[id];
         set => _variables[id] = value;
     }

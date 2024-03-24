@@ -5,8 +5,7 @@ namespace Interpreter.Lib.IR.CheckSemantics.Variables;
 public class SymbolTable
 {
     private readonly Dictionary<string, Symbol> _symbols = new();
-    private readonly Dictionary<string, Type> _types = new();
-        
+
     private SymbolTable _openScope;
 
     public void AddOpenScope(SymbolTable table)
@@ -14,30 +13,29 @@ public class SymbolTable
         _openScope = table;
     }
 
-    public void AddSymbol(Symbol symbol) => _symbols[symbol.Id] = symbol;
+    /// <summary>
+    /// Символы доступные в области видимости таблицы
+    /// </summary>
+    public IEnumerable<Symbol> GetAvailableSymbols() =>
+        _symbols.Values.Concat(_openScope?.GetAvailableSymbols() ?? Array.Empty<Symbol>());
 
-    public void AddType(Type type, string typeId = null) =>
-        _types[typeId ?? type.ToString()] = type;
-        
-    public Type FindType(string typeId)
-    {
-        var hasInsideTheScope = _types.TryGetValue(typeId, out var type);
-        return !hasInsideTheScope ? _openScope?.FindType(typeId) : type;
-    }
+    public void AddSymbol(Symbol symbol) =>
+        _symbols[symbol.Id] = symbol;
 
     /// <summary>
     /// Поиск эффективного символа
     /// </summary>
-    public T FindSymbol<T>(string id) where T : Symbol
+    public TSymbol FindSymbol<TSymbol>(string id) where TSymbol : Symbol
     {
         var hasInsideTheScope = _symbols.TryGetValue(id, out var symbol);
-        return !hasInsideTheScope ? _openScope?.FindSymbol<T>(id) : symbol as T;
+        return !hasInsideTheScope
+            ? _openScope?.FindSymbol<TSymbol>(id)
+            : symbol as TSymbol;
     }
 
     /// <summary>
     /// Проверяет наличие собственного символа
     /// </summary>
-    public bool ContainsSymbol(string id) => _symbols.ContainsKey(id);
-
-    public void Clear() => _symbols.Clear();
+    public bool ContainsSymbol(string id) =>
+        _symbols.ContainsKey(id);
 }

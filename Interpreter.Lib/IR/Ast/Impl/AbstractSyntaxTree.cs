@@ -1,54 +1,51 @@
 using System.Text;
-using Interpreter.Lib.BackEnd.Instructions;
-using Interpreter.Lib.IR.Ast.Nodes;
+using Interpreter.Lib.BackEnd;
+using Interpreter.Lib.IR.Ast.Visitors;
+using Interpreter.Lib.IR.CheckSemantics.Visitors;
+using Interpreter.Lib.IR.CheckSemantics.Visitors.Services.Impl;
 
 namespace Interpreter.Lib.IR.Ast.Impl;
 
 public class AbstractSyntaxTree : IAbstractSyntaxTree
 {
     private readonly AbstractSyntaxTreeNode _root;
+    
+    private readonly SymbolTableInitializer _symbolTableInitializer;
+    private readonly TypeSystemLoader _typeSystemLoader;
+    private readonly DeclarationVisitor _declarationVisitor;
+    
+    private readonly SemanticChecker _semanticChecker;
+    private readonly InstructionProvider _instructionProvider;
 
     public AbstractSyntaxTree(AbstractSyntaxTreeNode root)
     {
         _root = root;
+        var storage = new FunctionWithUndefinedReturnStorage();
+        
+        _symbolTableInitializer = new SymbolTableInitializer(
+            new SymbolTableInitializerService(),
+            new StandardLibraryProvider(
+                new JavaScriptTypesProvider()));
+        _typeSystemLoader = new TypeSystemLoader(
+            new TypeDeclarationsResolver(
+                new JavaScriptTypesProvider()),
+            new JavaScriptTypesProvider());
+        _declarationVisitor = new DeclarationVisitor(storage);
+        
+        _semanticChecker = new SemanticChecker(
+            new DefaultValueForTypeCalculator(),
+            storage);
+        _instructionProvider = new InstructionProvider();
     }
 
-    private void Check() =>
-        GetAllNodes().ToList().ForEach(node => node.SemanticCheck());
-
-    private IEnumerable<AbstractSyntaxTreeNode> GetAllNodes() =>
-        _root.GetAllNodes();
-
-    public List<Instruction> GetInstructions()
+    public AddressedInstructions GetInstructions()
     {
-        Check();
-            
-        var start = 0;
-        var result = new List<Instruction>();
-        foreach (var node in _root)
-        {
-            var instructions = node.ToInstructions(start);
-            result.AddRange(instructions);
-            start += instructions.Count;
-        }
-
-        result.Sort();
-        result.Add(new Halt(result.Count));
-
-        var calls = result.OfType<CallFunction>().GroupBy(i => i.Jump());
-        foreach (var call in calls)
-        {
-            var returns = result.OfType<Return>()
-                .Where(r => r.FunctionStart == call.Key);
-            foreach (var ret in returns)
-            {
-                foreach (var caller in call)
-                {
-                    ret.AddCaller(caller.Number + 1);
-                }
-            }
-        }
-        return result;
+        _root.Accept(_symbolTableInitializer);
+        _root.Accept(_typeSystemLoader);
+        _root.Accept(_declarationVisitor);
+        
+        _root.Accept(_semanticChecker);
+        return _root.Accept(_instructionProvider);
     }
 
     public override string ToString()

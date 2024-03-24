@@ -1,20 +1,17 @@
+using System.Globalization;
 using System.Text.RegularExpressions;
 using Interpreter.Lib.FrontEnd.GetTokens;
 using Interpreter.Lib.FrontEnd.GetTokens.Data;
 using Interpreter.Lib.IR.Ast;
 using Interpreter.Lib.IR.Ast.Impl;
-using Interpreter.Lib.IR.Ast.Nodes;
-using Interpreter.Lib.IR.Ast.Nodes.Declarations;
-using Interpreter.Lib.IR.Ast.Nodes.Expressions;
-using Interpreter.Lib.IR.Ast.Nodes.Expressions.AccessExpressions;
-using Interpreter.Lib.IR.Ast.Nodes.Expressions.ComplexLiterals;
-using Interpreter.Lib.IR.Ast.Nodes.Expressions.PrimaryExpressions;
-using Interpreter.Lib.IR.Ast.Nodes.Statements;
-using Interpreter.Lib.IR.CheckSemantics.Exceptions;
-using Interpreter.Lib.IR.CheckSemantics.Types;
-using Interpreter.Lib.IR.CheckSemantics.Variables;
-using Interpreter.Lib.IR.CheckSemantics.Variables.Symbols;
-using Expression = Interpreter.Lib.IR.Ast.Nodes.Expressions.Expression;
+using Interpreter.Lib.IR.Ast.Impl.Nodes;
+using Interpreter.Lib.IR.Ast.Impl.Nodes.Declarations;
+using Interpreter.Lib.IR.Ast.Impl.Nodes.Declarations.AfterTypesAreLoaded;
+using Interpreter.Lib.IR.Ast.Impl.Nodes.Expressions;
+using Interpreter.Lib.IR.Ast.Impl.Nodes.Expressions.AccessExpressions;
+using Interpreter.Lib.IR.Ast.Impl.Nodes.Expressions.ComplexLiterals;
+using Interpreter.Lib.IR.Ast.Impl.Nodes.Expressions.PrimaryExpressions;
+using Interpreter.Lib.IR.Ast.Impl.Nodes.Statements;
 
 namespace Interpreter.Lib.FrontEnd.TopDownParse.Impl;
 
@@ -25,6 +22,15 @@ public class Parser : IParser
 
     public Parser(ILexer lexer) => 
         _lexer = lexer;
+    
+    public IAbstractSyntaxTree TopDownParse(string text)
+    {
+        _tokens = _lexer.GetTokens(text);
+            
+        var root = Script();
+        Expect("EOP");
+        return new AbstractSyntaxTree(root);
+    }
 
     private Token Expect(string expectedTag, string expectedValue = null)
     {
@@ -35,11 +41,7 @@ public class Parser : IParser
         if (_tokens.Current!.Value != (expectedValue ?? _tokens.Current.Value))
             throw new ParserException(_tokens.Current.Segment, expectedValue, _tokens.Current);
 
-        if (CurrentIs(expectedTag) && _tokens.Current.Value == (expectedValue ?? _tokens.Current.Value))
-        {
-            _tokens.MoveNext();
-        }
-
+        _tokens.MoveNext();
         return current;
     }
 
@@ -61,69 +63,59 @@ public class Parser : IParser
         CurrentIs("Operator") &&
         _tokens.Current!.Value == @operator;
 
-    public IAbstractSyntaxTree TopDownParse(string text)
-    {
-        _tokens = _lexer.GetTokens(text);
-            
-        var root = Script(SymbolTableUtils.GetStandardLibrary());
-        Expect("EOP");
-        return new AbstractSyntaxTree(root);
-    }
+    private ScriptBody Script() =>
+        new(StatementList());
 
-    private ScriptBody Script(SymbolTable table = null) =>
-        new(StatementList(table ?? new SymbolTable()))
-        {
-            SymbolTable = table ?? new SymbolTable()
-        };
-
-    private IEnumerable<StatementListItem> StatementList(SymbolTable table)
+    private IEnumerable<StatementListItem> StatementList()
     {
         var statementList = new List<StatementListItem>();
         while (
             CurrentIsKeyword("function") || CurrentIsKeyword("let") || CurrentIsKeyword("const") ||
             CurrentIs("Ident") || CurrentIsLiteral() || CurrentIs("LeftParen") ||
+            CurrentIsOperator("-") || CurrentIsOperator("!") || CurrentIsOperator("~") ||
             CurrentIs("LeftCurl") || CurrentIsKeyword("return") || CurrentIsKeyword("break") ||
             CurrentIsKeyword("continue") || CurrentIsKeyword("if") || CurrentIsKeyword("while") ||
             CurrentIsKeyword("type")
         )
         {
-            statementList.Add(StatementListItem(table));
+            statementList.Add(StatementListItem());
         }
 
         return statementList;
     }
 
-    private StatementListItem StatementListItem(SymbolTable table)
+    private StatementListItem StatementListItem()
     {
-        if (CurrentIsKeyword("function") || CurrentIsKeyword("let") || CurrentIsKeyword("const"))
+        if (CurrentIsKeyword("function") || CurrentIsKeyword("let") ||
+            CurrentIsKeyword("const") || CurrentIsKeyword("type"))
         {
-            return Declaration(table);
+            return Declaration();
         }
 
-        return Statement(table);
+        return Statement();
     }
 
-    private Statement Statement(SymbolTable table)
+    private Statement Statement()
     {
         if (CurrentIs("Ident") || CurrentIsLiteral() || CurrentIs("LeftParen") || CurrentIsOperator("-") ||
-            CurrentIsOperator("!"))
+            CurrentIsOperator("!") || CurrentIsOperator("~"))
         {
-            return ExpressionStatement(table);
+            return ExpressionStatement();
         }
 
         if (CurrentIs("LeftCurl"))
         {
-            return BlockStatement(table);
+            return BlockStatement();
         }
 
         if (CurrentIsKeyword("return"))
         {
-            return ReturnStatement(table);
+            return ReturnStatement();
         }
 
         if (CurrentIsKeyword("break"))
         {
-            return new BreakStatement
+            return new InsideStatementJump(InsideStatementJump.Break)
             {
                 Segment = Expect("Keyword", "break").Segment
             };
@@ -131,7 +123,7 @@ public class Parser : IParser
 
         if (CurrentIsKeyword("continue"))
         {
-            return new ContinueStatement
+            return new InsideStatementJump(InsideStatementJump.Continue)
             {
                 Segment = Expect("Keyword", "continue").Segment
             };
@@ -139,156 +131,126 @@ public class Parser : IParser
 
         if (CurrentIsKeyword("if"))
         {
-            return IfStatement(table);
+            return IfStatement();
         }
 
         if (CurrentIsKeyword("while"))
         {
-            return WhileStatement(table);
-        }
-
-        if (CurrentIsKeyword("type"))
-        {
-            return TypeStatement(table);
+            return WhileStatement();
         }
 
         return null;
     }
 
-    private BlockStatement BlockStatement(SymbolTable table)
+    private BlockStatement BlockStatement()
     {
-        var newTable = new SymbolTable();
-        newTable.AddOpenScope(table);
-
         Expect("LeftCurl");
-        var block = new BlockStatement(StatementList(newTable))
-        {
-            SymbolTable = newTable
-        };
+        var block = new BlockStatement(StatementList());
         Expect("RightCurl");
 
         return block;
     }
 
-    private ExpressionStatement ExpressionStatement(SymbolTable table)
+    private ExpressionStatement ExpressionStatement()
     {
-        return new(Expression(table));
+        return new(Expression());
     }
 
-    private ReturnStatement ReturnStatement(SymbolTable table)
+    private ReturnStatement ReturnStatement()
     {
         var ret = Expect("Keyword", "return");
-        if (CurrentIs("Ident") || CurrentIsLiteral() || CurrentIs("LeftParen") || CurrentIsOperator("-") ||
-            CurrentIsOperator("!") || CurrentIs("LeftCurl") || CurrentIs("LeftBracket"))
+        if (CurrentIs("Ident") || CurrentIsLiteral() || CurrentIs("LeftParen")||
+            CurrentIsOperator("-") || CurrentIsOperator("!") || CurrentIsOperator("~") ||
+            CurrentIs("LeftCurl") || CurrentIs("LeftBracket"))
         {
-            return new ReturnStatement(Expression(table))
-            {
-                Segment = ret.Segment,
-                SymbolTable = table
-            };
+            return new ReturnStatement(Expression()) { Segment = ret.Segment };
         }
 
-        return new ReturnStatement
-        {
-            Segment = ret.Segment
-        };
+        return new ReturnStatement { Segment = ret.Segment };
     }
 
-    private IfStatement IfStatement(SymbolTable table)
+    private IfStatement IfStatement()
     {
         var token = Expect("Keyword", "if");
         Expect("LeftParen");
-        var expr = Expression(table);
+        var expr = Expression();
         Expect("RightParen");
-        var then = Statement(table);
+        var then = Statement();
         if (CurrentIsKeyword("else"))
         {
             Expect("Keyword", "else");
-            var @else = Statement(table);
-            return new IfStatement(expr, then, @else) {SymbolTable = table, Segment = token.Segment};
+            var @else = Statement();
+            return new IfStatement(expr, then, @else) {Segment = token.Segment};
         }
 
-        return new IfStatement(expr, then) {SymbolTable = table, Segment = token.Segment};
+        return new IfStatement(expr, then) {Segment = token.Segment};
     }
 
-    private WhileStatement WhileStatement(SymbolTable table)
+    private WhileStatement WhileStatement()
     {
         var token = Expect("Keyword", "while");
         Expect("LeftParen");
-        var expr = Expression(table);
+        var expr = Expression();
         Expect("RightParen");
-        var stmt = Statement(table);
-        return new WhileStatement(expr, stmt) {SymbolTable = table, Segment = token.Segment};
+        var stmt = Statement();
+        return new WhileStatement(expr, stmt) {Segment = token.Segment};
     }
 
-    private TypeStatement TypeStatement(SymbolTable table)
+    private TypeDeclaration TypeDeclaration()
     {
         var typeWord = Expect("Keyword", "type");
         var ident = Expect("Ident");
         Expect("Assign");
-        if (CurrentIs("LeftCurl"))
-        {
-            table.AddType(new Type(ident.Value));
-        }
-        var type = TypeValue(table);
+        var type = TypeValue();
 
-        type.Recursive = type.ToString().Contains(ident.Value);
+        var typeId = new IdentifierReference(name: ident.Value)
+            { Segment = ident.Segment };
 
-        if (type is ObjectType objectType && type.Recursive)
-        {
-            objectType.ResolveSelfReferences(ident.Value);
-        }
-        table.AddType(type, ident.Value);
-            
-        return new TypeStatement(ident.Value, type)
-        {
-            Segment = typeWord.Segment,
-            SymbolTable = table
-        };
+        return new TypeDeclaration(typeId, type) { Segment = typeWord.Segment + ident.Segment };
     }
 
-    private Type TypeValue(SymbolTable table)
+    private TypeValue TypeValue()
     {
         if (CurrentIs("Ident"))
         {
             var ident = Expect("Ident");
-            var typeFromTable = table.FindType(ident.Value);
-            if (typeFromTable == null)
-            {
-                throw new UnknownIdentifierReference(
-                    new IdentifierReference(ident.Value)
-                        {Segment = ident.Segment}
-                );
-            }
+            var identType = new TypeIdentValue(
+                TypeId: new IdentifierReference(name: ident.Value)
+                    { Segment = ident.Segment });
 
-            return WithSuffix(typeFromTable);
+            return WithSuffix(identType);
         }
 
         if (CurrentIs("LeftCurl"))
         {
             Expect("LeftCurl");
-            var propertyTypes = new List<PropertyType>();
+            var propertyTypes = new List<PropertyTypeValue>();
             while (CurrentIs("Ident"))
             {
                 var ident = Expect("Ident");
                 Expect("Colon");
-                var propType = TypeValue(table); 
-                propertyTypes.Add(new PropertyType(ident.Value, propType));
+                var propType = TypeValue(); 
+                propertyTypes.Add(
+                    new PropertyTypeValue(
+                        ident.Value,
+                        propType));
                 Expect("SemiColon");
             }
 
             Expect("RightCurl");
                 
-            return WithSuffix(new ObjectType(propertyTypes));
+            return WithSuffix(new ObjectTypeValue(propertyTypes));
         }
 
         if (CurrentIs("LeftParen"))
         {
             Expect("LeftParen");
-            var args = new List<Type>();
-            while (CurrentIs("Ident") || CurrentIs("LeftCurl") || CurrentIs("LeftParen"))
+            var args = new List<TypeValue>();
+            while (CurrentIs("Ident") ||
+                   CurrentIs("LeftCurl") ||
+                   CurrentIs("LeftParen"))
             {
-                args.Add(TypeValue(table));
+                args.Add(TypeValue());
                 if (!CurrentIs("RightParen"))
                 {
                     Expect("Comma");
@@ -296,14 +258,14 @@ public class Parser : IParser
             }
             Expect("RightParen");
             Expect("Arrow");
-            var returnType = TypeValue(table);
-            return new FunctionType(returnType, args);
+            var returnType = TypeValue();
+            return new FunctionTypeValue(returnType, args);
         }
 
         return null;
     }
 
-    private Type WithSuffix(Type baseType)
+    private TypeValue WithSuffix(TypeValue baseType)
     {
         var type = baseType;
         while (CurrentIs("LeftBracket") || CurrentIs("QuestionMark"))
@@ -312,49 +274,51 @@ public class Parser : IParser
             {
                 Expect("LeftBracket");
                 Expect("RightBracket");
-                type = new ArrayType(type);
+                type = new ArrayTypeValue(type);
             } 
             else if (CurrentIs("QuestionMark"))
             {
                 Expect("QuestionMark");
-                type = new NullableType(type);
+                type = new NullableTypeValue(type);
             }
         }
 
         return type;
     }
 
-    private Declaration Declaration(SymbolTable table)
+    private Declaration Declaration()
     {
         if (CurrentIsKeyword("function"))
         {
-            return FunctionDeclaration(table);
+            return FunctionDeclaration();
         }
 
         if (CurrentIsKeyword("let") || CurrentIsKeyword("const"))
         {
-            return LexicalDeclaration(table);
+            return LexicalDeclaration();
+        }
+        
+        if (CurrentIsKeyword("type"))
+        {
+            return TypeDeclaration();
         }
 
         return null;
     }
 
-    private FunctionDeclaration FunctionDeclaration(SymbolTable table)
+    private FunctionDeclaration FunctionDeclaration()
     {
-        var newTable = new SymbolTable();
-        newTable.AddOpenScope(table);
-
         Expect("Keyword", "function");
         var ident = Expect("Ident");
 
         Expect("LeftParen");
-        var args = new List<VariableSymbol>();
+        var args = new List<PropertyTypeValue>();
         if (CurrentIs("Ident"))
         {
             var arg = Expect("Ident").Value;
             Expect("Colon");
-            var type = TypeValue(table);
-            args.Add(new VariableSymbol(arg, type));
+            var type = TypeValue();
+            args.Add(new PropertyTypeValue(arg, type));
         }
 
         while (CurrentIs("Comma"))
@@ -362,150 +326,138 @@ public class Parser : IParser
             Expect("Comma");
             var arg = Expect("Ident").Value;
             Expect("Colon");
-            var type = TypeValue(table);
-            args.Add(new VariableSymbol(arg, type));
+            var type = TypeValue();
+            args.Add(new PropertyTypeValue(arg, type));
         }
 
-        Expect("RightParen");
+        var rp = Expect("RightParen");
 
-        var returnType = TypeUtils.JavaScriptTypes.Void;
+        TypeValue returnType = new TypeIdentValue(
+            TypeId: new IdentifierReference(name: "undefined")
+                { Segment = rp.Segment });
+
         if (CurrentIs("Colon"))
         {
             Expect("Colon");
-            returnType = TypeValue(table);
+            returnType = TypeValue();
         }
 
-        var functionSymbol =
-            new FunctionSymbol(ident.Value, args,
-                new FunctionType(returnType, args.Select(x => x.Type))
-            );
-        table.AddSymbol(functionSymbol);
-
-        return new FunctionDeclaration(functionSymbol, BlockStatement(newTable))
-        {
-            Segment = ident.Segment,
-            SymbolTable = newTable
-        };
+        var name = new IdentifierReference(ident.Value) { Segment = ident.Segment };
+        return new FunctionDeclaration(name, returnType, args, BlockStatement())
+            { Segment = ident.Segment };
     }
 
-    private LexicalDeclaration LexicalDeclaration(SymbolTable table)
+    private LexicalDeclaration LexicalDeclaration()
     {
         var readOnly = CurrentIsKeyword("const");
         Expect("Keyword", readOnly ? "const" : "let");
-        var declaration = new LexicalDeclaration(readOnly)
-        {
-            SymbolTable = table
-        };
+        var declaration = new LexicalDeclaration(readOnly);
 
-        AddToDeclaration(declaration, table);
+        AddToDeclaration(declaration);
 
         while (CurrentIs("Comma"))
         {
             Expect("Comma");
-            AddToDeclaration(declaration, table);
+            AddToDeclaration(declaration);
         }
 
         return declaration;
     }
 
-    private void AddToDeclaration(LexicalDeclaration declaration, SymbolTable table)
+    private void AddToDeclaration(LexicalDeclaration declaration)
     {
         var ident = Expect("Ident");
+        var identRef = new IdentifierReference(ident.Value) { Segment = ident.Segment };
+        var assignment = new AssignmentExpression(
+                new MemberExpression(identRef),
+                new ImplicitLiteral(
+                    new TypeIdentValue(
+                        new IdentifierReference("undefined"))))
+            { Segment = ident.Segment };
+
         if (CurrentIs("Assign"))
         {
             var assignSegment = Expect("Assign").Segment;
-            declaration.AddAssignment(ident.Value, ident.Segment, Expression(table), assignSegment);
+            var expression = Expression();
+            assignment = new AssignmentExpression(
+                new MemberExpression(identRef), expression
+            ) { Segment = assignSegment };
         }
         else if (CurrentIs("Colon"))
         {
             Expect("Colon");
-            var type = TypeValue(table);
+            var type = TypeValue();
             if (CurrentIs("Assign"))
             {
                 var assignSegment = Expect("Assign").Segment;
-                declaration.AddAssignment(ident.Value, ident.Segment, Expression(table), assignSegment, type);
+                var expression = Expression();
+                assignment = new AssignmentExpression(
+                    new MemberExpression(identRef),
+                    expression, type
+                ) { Segment = assignSegment };
             }
             else
             {
-                declaration.AddAssignment(
-                    ident.Value,
-                    ident.Segment,
-                    new Literal(
-                        type,
-                        TypeUtils.GetDefaultValue(type),
-                        label: TypeUtils.GetDefaultValue(type) == null ? "null" : null
-                    )
-                );
+                var expression = new ImplicitLiteral(type);
+                assignment = new AssignmentExpression(
+                    lhs: new MemberExpression(identRef),
+                    expression,
+                    type);
             }
         }
+        declaration.AddAssignment(assignment);
     }
 
-    private Expression Expression(SymbolTable table)
+    private Expression Expression()
     {
-        return AssignmentExpression(table);
-    }
-
-    private Expression AssignmentExpression(SymbolTable table)
-    {
-        var lhs = LeftHandSideExpression(table);
-        if (CurrentIs("Assign") && !(lhs is CallExpression))
+        var expr = CastExpression();
+        if (expr is LeftHandSideExpression lhs && CurrentIs("Assign"))
         {
             var assign = Expect("Assign");
-            var member = lhs is IdentifierReference reference
-                ? (MemberExpression) reference
-                : (MemberExpression) lhs;
-            return new AssignmentExpression(member, AssignmentExpression(table))
-                {SymbolTable = table, Segment = assign.Segment};
+            return new AssignmentExpression(lhs, Expression())
+                {Segment = assign.Segment};
         }
-
-        return lhs;
-    }
-
-    private Expression LeftHandSideExpression(SymbolTable table)
-    {
-        var expr = CastExpression(table);
-        if (expr is IdentifierReference identRef)
-        {
-            if (CurrentIs("LeftParen") || CurrentIs("LeftBracket") || CurrentIs("Dot"))
-            {
-                return CallExpression(identRef, table);
-            }
-        }
-
         return expr;
     }
 
-    private Expression CallExpression(IdentifierReference identRef, SymbolTable table)
+    private Expression CallExpression()
     {
-        var member = MemberExpression(identRef, table);
+        var member = MemberExpression();
         if (CurrentIs("LeftParen"))
         {
             var lp = Expect("LeftParen");
             var expressions = new List<Expression>();
-            if (CurrentIs("Ident") || CurrentIsLiteral() || CurrentIs("LeftParen") || CurrentIsOperator("-"))
+            if (CurrentIs("Ident") || CurrentIsLiteral() ||
+                CurrentIs("LeftParen") || CurrentIsOperator("-") ||
+                CurrentIsOperator("!") || CurrentIsOperator("~") ||
+                CurrentIs("LeftCurl") || CurrentIs("LeftBracket"))
             {
-                expressions.Add(Expression(table));
+                expressions.Add(Expression());
             }
 
             while (CurrentIs("Comma"))
             {
                 Expect("Comma");
-                expressions.Add(Expression(table));
+                expressions.Add(Expression());
             }
 
             Expect("RightParen");
-            return new CallExpression(member, expressions)
-            {
-                SymbolTable = table,
-                Segment = lp.Segment
-            };
+            return new CallExpression(member as MemberExpression, expressions)
+                { Segment = lp.Segment };
         }
 
         return member;
     }
 
-    private MemberExpression MemberExpression(IdentifierReference identRef, SymbolTable table)
+    private Expression MemberExpression()
     {
+        var primary = PrimaryExpression();
+
+        if (!CurrentIs("LeftBracket") && !CurrentIs("Dot") &&
+            !CurrentIs("Assign") && !CurrentIs("LeftParen"))
+            return primary;
+
+        var identRef = primary as IdentifierReference;
         var accessChain = new List<AccessExpression>();
         while (CurrentIs("LeftBracket") || CurrentIs("Dot"))
         {
@@ -514,7 +466,7 @@ public class Parser : IParser
             {
                 access = Expect("LeftBracket");
                 var lb = access.Segment;
-                var expr = Expression(table);
+                var expr = Expression();
                 var rb = Expect("RightBracket").Segment;
                 accessChain.Add(
                     new IndexAccess(expr, accessChain.LastOrDefault()) {Segment = lb + rb}
@@ -525,57 +477,51 @@ public class Parser : IParser
                 access = Expect("Dot");
                 var identToken = Expect("Ident");
                 var idRef = new IdentifierReference(identToken.Value)
-                {
-                    Segment = identToken.Segment,
-                    SymbolTable = table
-                };
+                    { Segment = identToken.Segment };
                 accessChain.Add(
                     new DotAccess(idRef, accessChain.LastOrDefault()) {Segment = access.Segment}
                 );
             }
         }
- 
-        return new MemberExpression(identRef, accessChain.FirstOrDefault())
-        {
-            SymbolTable = table
-        };
+
+        return new MemberExpression(identRef, accessChain.FirstOrDefault(), accessChain.LastOrDefault());
     }
 
-    private Expression CastExpression(SymbolTable table)
+    private Expression CastExpression()
     {
-        var cond = ConditionalExpression(table);
+        var cond = ConditionalExpression();
         if (CurrentIsKeyword("as"))
         {
             var asKeyword = Expect("Keyword", "as");
-            var type = TypeValue(table);
+            var type = TypeValue();
             return new CastAsExpression(cond, type) {Segment = asKeyword.Segment};
         }
 
         return cond;
     }
 
-    private Expression ConditionalExpression(SymbolTable table)
+    private Expression ConditionalExpression()
     {
-        var test = OrExpression(table);
+        var test = OrExpression();
         if (CurrentIs("QuestionMark"))
         {
             Expect("QuestionMark");
-            var consequent = AssignmentExpression(table);
+            var consequent = Expression();
             Expect("Colon");
-            var alternate = AssignmentExpression(table);
+            var alternate = Expression();
             return new ConditionalExpression(test, consequent, alternate);
         }
 
         return test;
     }
 
-    private Expression OrExpression(SymbolTable table)
+    private Expression OrExpression()
     {
-        var left = AndExpression(table);
+        var left = AndExpression();
         while (CurrentIsOperator("||"))
         {
             var op = Expect("Operator");
-            var right = AndExpression(table);
+            var right = AndExpression();
             left = new BinaryExpression(left, op.Value, right)
             {
                 Segment = op.Segment
@@ -585,13 +531,13 @@ public class Parser : IParser
         return left;
     }
 
-    private Expression AndExpression(SymbolTable table)
+    private Expression AndExpression()
     {
-        var left = EqualityExpression(table);
+        var left = EqualityExpression();
         while (CurrentIsOperator("&&"))
         {
             var op = Expect("Operator");
-            var right = EqualityExpression(table);
+            var right = EqualityExpression();
             left = new BinaryExpression(left, op.Value, right)
             {
                 Segment = op.Segment
@@ -601,13 +547,13 @@ public class Parser : IParser
         return left;
     }
 
-    private Expression EqualityExpression(SymbolTable table)
+    private Expression EqualityExpression()
     {
-        var left = RelationExpression(table);
+        var left = RelationExpression();
         while (CurrentIsOperator("==") || CurrentIsOperator("!="))
         {
             var op = Expect("Operator");
-            var right = RelationExpression(table);
+            var right = RelationExpression();
             left = new BinaryExpression(left, op.Value, right)
             {
                 Segment = op.Segment
@@ -617,14 +563,14 @@ public class Parser : IParser
         return left;
     }
 
-    private Expression RelationExpression(SymbolTable table)
+    private Expression RelationExpression()
     {
-        var left = AdditiveExpression(table);
+        var left = AdditiveExpression();
         while (CurrentIsOperator(">") || CurrentIsOperator("<") || CurrentIsOperator(">=") ||
                CurrentIsOperator("<="))
         {
             var op = Expect("Operator");
-            var right = AdditiveExpression(table);
+            var right = AdditiveExpression();
             left = new BinaryExpression(left, op.Value, right)
             {
                 Segment = op.Segment
@@ -634,13 +580,13 @@ public class Parser : IParser
         return left;
     }
 
-    private Expression AdditiveExpression(SymbolTable table)
+    private Expression AdditiveExpression()
     {
-        var left = MultiplicativeExpression(table);
+        var left = MultiplicativeExpression();
         while (CurrentIsOperator("+") || CurrentIsOperator("-"))
         {
             var op = Expect("Operator");
-            var right = MultiplicativeExpression(table);
+            var right = MultiplicativeExpression();
             left = new BinaryExpression(left, op.Value, right)
             {
                 Segment = op.Segment
@@ -650,14 +596,14 @@ public class Parser : IParser
         return left;
     }
 
-    private Expression MultiplicativeExpression(SymbolTable table)
+    private Expression MultiplicativeExpression()
     {
-        var left = UnaryExpression(table);
+        var left = UnaryExpression();
         while (CurrentIsOperator("*") || CurrentIsOperator("/") || CurrentIsOperator("%")
                || CurrentIsOperator("++") || CurrentIsOperator("::"))
         {
             var op = Expect("Operator");
-            var right = UnaryExpression(table);
+            var right = UnaryExpression();
             left = new BinaryExpression(left, op.Value, right)
             {
                 Segment = op.Segment
@@ -667,26 +613,31 @@ public class Parser : IParser
         return left;
     }
 
-    private Expression UnaryExpression(SymbolTable table)
+    private Expression UnaryExpression()
     {
         if (CurrentIsOperator("-") || CurrentIsOperator("!") || CurrentIsOperator("~"))
         {
             var op = Expect("Operator");
-            return new UnaryExpression(op.Value, UnaryExpression(table))
+            return new UnaryExpression(op.Value, UnaryExpression())
             {
                 Segment = op.Segment
             };
         }
 
-        return PrimaryExpression(table);
+        return LeftHandSideExpression();
+    }
+    
+    private Expression LeftHandSideExpression()
+    {
+        return CallExpression();
     }
 
-    private Expression PrimaryExpression(SymbolTable table)
+    private Expression PrimaryExpression()
     {
         if (CurrentIs("LeftParen"))
         {
             Expect("LeftParen");
-            var expr = Expression(table);
+            var expr = Expression();
             Expect("RightParen");
             return expr;
         }
@@ -696,8 +647,7 @@ public class Parser : IParser
             var ident = Expect("Ident");
             var id = new IdentifierReference(ident.Value)
             {
-                Segment = ident.Segment,
-                SymbolTable = table
+                Segment = ident.Segment
             };
 
             return id;
@@ -710,12 +660,12 @@ public class Parser : IParser
 
         if (CurrentIs("LeftCurl"))
         {
-            return ObjectLiteral(table);
+            return ObjectLiteral();
         }
             
         if (CurrentIs("LeftBracket"))
         {
-            return ArrayLiteral(table);
+            return ArrayLiteral();
         }
 
         return null;
@@ -728,33 +678,51 @@ public class Parser : IParser
         {
             var str = Expect("StringLiteral");
             return new Literal(
-                TypeUtils.JavaScriptTypes.String,
-                Regex.Unescape(str.Value.Trim('"')),
+                new TypeIdentValue(
+                    TypeId: new IdentifierReference(name: "string")
+                        {Segment = str.Segment}),
+                value: Regex.Unescape(str.Value.Trim('"')),
                 segment,
-                str.Value
+                label: str.Value
                     .Replace(@"\", @"\\")
-                    .Replace(@"""", @"\""")
-            );
+                    .Replace(@"""", @"\"""));
         }
 
         return _tokens.Current.Type.Tag switch
         {
-            "NullLiteral" => new Literal(TypeUtils.JavaScriptTypes.Null,
-                Expect("NullLiteral").Value == "null" ? null : "", segment, "null"),
-            "IntegerLiteral" => new Literal(TypeUtils.JavaScriptTypes.Number,
-                double.Parse(Expect("IntegerLiteral").Value), segment),
-            "FloatLiteral" => new Literal(TypeUtils.JavaScriptTypes.Number,
-                double.Parse(Expect("FloatLiteral").Value), segment),
-            "BooleanLiteral" => new Literal(TypeUtils.JavaScriptTypes.Boolean,
-                bool.Parse(Expect("BooleanLiteral").Value), segment),
-            _ => new Literal(TypeUtils.JavaScriptTypes.Undefined, new TypeUtils.Undefined())
+            "NullLiteral" => new Literal(
+                new TypeIdentValue(
+                    TypeId: new IdentifierReference(name: "null")
+                        { Segment = _tokens.Current.Segment }),
+                Expect("NullLiteral").Value == "null" ? null : string.Empty,
+                segment,
+                label: "null"),
+            "IntegerLiteral" => new Literal(
+                new TypeIdentValue(
+                    TypeId: new IdentifierReference(name: "number")
+                        { Segment = _tokens.Current.Segment }),
+                value: double.Parse(Expect("IntegerLiteral").Value),
+                segment),
+            "FloatLiteral" => new Literal(
+                new TypeIdentValue(
+                    TypeId: new IdentifierReference(name: "number")
+                        { Segment = _tokens.Current.Segment }),
+                value: double.Parse(
+                    Expect("FloatLiteral").Value,
+                    CultureInfo.InvariantCulture),
+                segment),
+            "BooleanLiteral" => new Literal(
+                new TypeIdentValue(
+                    TypeId: new IdentifierReference(name: "boolean")
+                        { Segment = _tokens.Current.Segment }),
+                value: bool.Parse(Expect("BooleanLiteral").Value),
+                segment),
+            _ => throw new ParserException("There are no more supported literals")
         };
     }
 
-    private ObjectLiteral ObjectLiteral(SymbolTable table)
+    private ObjectLiteral ObjectLiteral()
     {
-        var newTable = new SymbolTable();
-        newTable.AddOpenScope(table);
         Expect("LeftCurl");
         var properties = new List<Property>();
         var methods = new List<FunctionDeclaration>();
@@ -762,72 +730,61 @@ public class Parser : IParser
         {
             var idToken = Expect("Ident");
             var id = new IdentifierReference(idToken.Value)
-            {
-                Segment = idToken.Segment,
-                SymbolTable = newTable
-            };
+                { Segment = idToken.Segment };
             if (CurrentIs("Colon"))
             {
                 Expect("Colon");
-                var expr = Expression(newTable);
+                var expr = Expression();
                 properties.Add(new Property(id, expr));
             }
             else if (CurrentIs("Arrow"))
             {
                 Expect("Arrow");
                 Expect("LeftParen");
-                var args = new List<VariableSymbol>();
+                var args = new List<PropertyTypeValue>();
                 while (CurrentIs("Ident"))
                 {
-                    var name = Expect("Ident").Value;
+                    var paramName = Expect("Ident").Value;
                     Expect("Colon");
-                    var type = TypeValue(newTable);
-                    args.Add(new VariableSymbol(name, type));
+                    var type = TypeValue();
+                    args.Add(new PropertyTypeValue(paramName, type));
                     if (!CurrentIs("RightParen"))
                     {
                         Expect("Comma");
                     }
                 }
-                Expect("RightParen");
-                var returnType = TypeUtils.JavaScriptTypes.Void;
+                var rp = Expect("RightParen");
+                TypeValue returnType = new TypeIdentValue(
+                    TypeId: new IdentifierReference(name: "undefined")
+                        { Segment = rp.Segment });
                 if (CurrentIs("Colon"))
                 {
                     Expect("Colon");
-                    returnType = TypeValue(newTable);
+                    returnType = TypeValue();
                 }
 
-                var functionSymbol = new FunctionSymbol(idToken.Value, args,
-                    new FunctionType(returnType, args.Select(a => a.Type))
+                var name = new IdentifierReference(idToken.Value) { Segment = idToken.Segment };
+                methods.Add(new FunctionDeclaration(name, returnType, args, BlockStatement())
+                    { Segment = idToken.Segment }
                 );
-                newTable.AddSymbol(functionSymbol);
-                var bodyTable = new SymbolTable();
-                bodyTable.AddOpenScope(newTable);
-                methods.Add(new FunctionDeclaration(functionSymbol, BlockStatement(bodyTable))
-                {
-                    Segment = idToken.Segment,
-                    SymbolTable = bodyTable
-                });
             }
 
             Expect("SemiColon");
         }
         Expect("RightCurl");
-        return new ObjectLiteral(properties, methods)
-        {
-            SymbolTable = newTable
-        };
+        return new ObjectLiteral(properties, methods);
     }
 
-    private ArrayLiteral ArrayLiteral(SymbolTable table)
+    private ArrayLiteral ArrayLiteral()
     {
         var lb = Expect("LeftBracket").Segment;
         var expressions = new List<Expression>();
         while (CurrentIs("Ident") || CurrentIsLiteral() ||
                CurrentIs("LeftParen") || CurrentIsOperator("-") ||
-               CurrentIsOperator("!") || CurrentIs("LeftCurl") ||
-               CurrentIs("LeftBracket"))
+               CurrentIsOperator("!") || CurrentIsOperator("~") ||
+               CurrentIs("LeftCurl") || CurrentIs("LeftBracket"))
         {
-            expressions.Add(Expression(table));
+            expressions.Add(Expression());
             if (!CurrentIs("RightBracket"))
             {
                 Expect("Comma");

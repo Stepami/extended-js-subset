@@ -1,18 +1,16 @@
+using Interpreter.Lib.BackEnd.Addresses;
+
 namespace Interpreter.Lib.BackEnd.Instructions;
 
 public class Halt : Instruction
 {
-    public Halt(int number) : base(number)
-    {
-    }
-
     public override bool End() => true;
 
-    public override int Execute(VirtualMachine vm)
+    public override IAddress Execute(VirtualMachine vm)
     {
         vm.Frames.Pop();
-        return -3;
+        return new HashAddress(seed: 0);
     }
 
-    protected override string ToStringRepresentation() => "End";
+    protected override string ToStringInternal() => "End";
 }

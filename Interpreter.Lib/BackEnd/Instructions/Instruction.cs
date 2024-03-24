@@ -1,21 +1,29 @@
+using Interpreter.Lib.BackEnd.Addresses;
+
 namespace Interpreter.Lib.BackEnd.Instructions;
 
-public abstract class Instruction : IComparable<Instruction>
+public abstract class Instruction
 {
-    public int Number { get; }
+    private IAddress _address;
 
-    protected Instruction(int number) => 
-        Number = number;
+    public IAddress Address
+    {
+        get => _address;
+        set
+        {
+            OnSetOfAddress(value);
+            _address = value;
+        }
+    }
+    
+    protected virtual void OnSetOfAddress(IAddress address) { }
 
-    public virtual int Jump() => Number + 1;
-
+    public abstract IAddress Execute(VirtualMachine vm);
+    
     public virtual bool End() => false;
 
-    public abstract int Execute(VirtualMachine vm);
+    protected abstract string ToStringInternal();
 
-    public int CompareTo(Instruction other) => Number.CompareTo(other.Number);
-
-    protected abstract string ToStringRepresentation();
-
-    public override string ToString() => $"{Number}: {ToStringRepresentation()}";
+    public override string ToString() =>
+        $"{Address}{ToStringInternal()}";
 }

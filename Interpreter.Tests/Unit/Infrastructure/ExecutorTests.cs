@@ -5,6 +5,7 @@ using Interpreter.Lib.FrontEnd.TopDownParse;
 using Interpreter.Lib.IR.Ast;
 using Interpreter.Services.Executor.Impl;
 using Interpreter.Services.Parsing;
+using Interpreter.Tests.Helpers;
 using Interpreter.Tests.Stubs;
 using Moq;
 using Xunit;
@@ -30,7 +31,7 @@ public class ExecutorTests
     {
         var ast = new Mock<IAbstractSyntaxTree>();
         ast.Setup(x => x.GetInstructions())
-            .Returns(new List<Instruction> { new Halt(0) });
+            .Returns(new AddressedInstructions { new Halt() });
 
         _parsingService.Setup(x => x.Parse(It.IsAny<string>()))
             .Returns(ast.Object);
@@ -76,13 +77,13 @@ public class ExecutorTests
     [Fact]
     public void InternalInterpreterErrorCaughtTest()
     {
-        var instruction = new Mock<Instruction>(MockBehavior.Default, 0);
+        var instruction = new Mock<Instruction>();
         instruction.Setup(x => x.Execute(It.IsAny<VirtualMachine>()))
             .Throws<NullReferenceException>();
             
         var ast = new Mock<IAbstractSyntaxTree>();
         ast.Setup(x => x.GetInstructions())
-            .Returns(new List<Instruction> { instruction.Object, new Halt(1) });
+            .Returns(new AddressedInstructions { instruction.Object, new Halt() });
 
         _parsingService.Setup(x => x.Parse(It.IsAny<string>()))
             .Returns(ast.Object);
